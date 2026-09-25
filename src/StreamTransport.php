@@ -73,6 +73,9 @@ final class StreamTransport implements TransportInterface
         return new self($stream);
     }
 
+    /**
+     * {@inheritDoc}
+     */
     public function write(string $bytes): void
     {
         if (!is_resource($this->stream)) {
@@ -103,6 +106,9 @@ final class StreamTransport implements TransportInterface
         }
     }
 
+    /**
+     * {@inheritDoc}
+     */
     public function read(float $timeoutSeconds): ?string
     {
         if (!is_resource($this->stream)) {
@@ -139,6 +145,9 @@ final class StreamTransport implements TransportInterface
         return $data;
     }
 
+    /**
+     * {@inheritDoc}
+     */
     public function close(): void
     {
         if (is_resource($this->stream)) {
