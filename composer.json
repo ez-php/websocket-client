@@ -1,6 +1,6 @@
 {
   "name": "ez-php/websocket-client",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "description": "RFC 6455 WebSocket client for ez-php — HTTP upgrade handshake, masked frame encoder, plain-TCP and TLS (wss://) transports.",
   "type": "library",
   "license": "MIT",

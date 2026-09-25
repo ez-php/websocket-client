@@ -12,6 +12,6 @@ use EzPhp\WebSocket\WebSocketException;
  *
  * @package EzPhp\WebsocketClient
  */
-class ConnectionException extends WebSocketException
+final class ConnectionException extends WebSocketException
 {
 }
