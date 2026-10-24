@@ -25,10 +25,11 @@ final class FrameEncoder
      * @param string      $payload Unmasked payload bytes
      * @param bool        $fin     FIN bit
      * @param string|null $maskKey Exactly 4 bytes; random when null (only tests should pass one)
+     * @param bool        $rsv1    RSV1 bit: first frame of a permessage-deflate compressed message
      *
      * @throws InvalidArgumentException when `$maskKey` is not 4 bytes long
      */
-    public function encode(Opcode $opcode, string $payload, bool $fin = true, ?string $maskKey = null): string
+    public function encode(Opcode $opcode, string $payload, bool $fin = true, ?string $maskKey = null, bool $rsv1 = false): string
     {
         $maskKey ??= random_bytes(4);
 
@@ -37,7 +38,7 @@ final class FrameEncoder
         }
 
         $length = strlen($payload);
-        $header = chr(($fin ? 0x80 : 0x00) | $opcode->value);
+        $header = chr(($fin ? 0x80 : 0x00) | ($rsv1 ? 0x40 : 0x00) | $opcode->value);
 
         if ($length <= 125) {
             $header .= chr(0x80 | $length);

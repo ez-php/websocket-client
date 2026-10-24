@@ -290,7 +290,8 @@ tests/
 ├── WebsocketClientHandshakeTest.php      — RFC 6455 Accept vector, request headers/injection guards, response validation
 ├── WebsocketClientClientTest.php         — Client behaviour over the fake transport: control frames, fragmentation, close handshake, protocol failures
 ├── WebsocketClientStreamTransportTest.php — StreamTransport over socket pairs and loopback TCP
-├── WebsocketClientEndToEndTest.php       — real ez-php/websocket Server in a child process: echo, binary, ping, close
+├── WebsocketClientCompressionTest.php    — permessage-deflate: offer header, compressed send (RSV1, masked), inflated fragments, declined offer, 1002/1007/1009, invalid agreements
+├── WebsocketClientEndToEndTest.php       — real ez-php/websocket Server in a child process (handed the test's autoloader): echo, binary, ping, close, compressed round trip
 └── Support/ws-echo-server.php            — the child process: Server + echo handler
 ```
 
@@ -312,9 +313,12 @@ closing handshake (sends CLOSE, waits for the peer's CLOSE up to a timeout, then
 ### Handshake (`src/Handshake.php`)
 
 Stateless and I/O-free. `buildRequest()` refuses reserved headers (`Host`, `Upgrade`, `Connection`,
-`Sec-WebSocket-*`) and CR/LF in names/values. `validateResponse()` requires status 101, `Upgrade`,
+`Sec-WebSocket-*`) and CR/LF in names/values, and adds the permessage-deflate offer when a
+`PerMessageDeflateConfig` is passed. `validateResponse()` requires status 101, `Upgrade`,
 `Connection: Upgrade`, and a matching `Sec-WebSocket-Accept` (compared with `hash_equals`); rejects
-extensions (none are offered) and unrequested subprotocols; returns the selected subprotocol.
+extensions unless compression was offered, and unrequested subprotocols; returns the selected
+subprotocol. `compression()` turns the response's `Sec-WebSocket-Extensions` into the agreement
+(`PerMessageDeflate::fromResponse()`, which rejects any other extension or parameter).
 Failures throw `EzPhp\WebSocket\HandshakeException` from `ez-php/websocket` (reused, not duplicated).
 
 ### FrameEncoder (`src/FrameEncoder.php`)
@@ -340,8 +344,13 @@ PHP warnings from connect/write are captured into `ConnectionException` messages
 - **Blocking, single-connection API.** No Fibers or event loop: `receive()` blocks up to its
   timeout. Applications multiplexing many sockets should use `ez-php/websocket`'s server-side loop
   or run one client per process/fiber. `Client` is not safe to share between fibers mid-call.
-- **No extensions, no permessage-deflate.** The handshake never offers any, and rejects a server
-  that answers with one.
+- **permessage-deflate is the only extension, and opt-in.** Without a `PerMessageDeflateConfig`
+  nothing is offered and an answering `Sec-WebSocket-Extensions` fails the handshake as before. With
+  it, the codec and negotiation are `ez-php/websocket`'s `PerMessageDeflate` (shared, not copied):
+  outgoing TEXT/BINARY are compressed with RSV1, received messages with RSV1 on their first frame are
+  inflated after reassembly with the 16 MiB limit applied to the inflated size (1009), undecodable
+  data fails with 1007, RSV1 anywhere else with 1002. Needs the `ez-php/websocket` release that
+  ships `PerMessageDeflate`.
 - **Oversized *single* frames** are rejected by `Frame::parse()` (16 MiB) and surface as 1002;
   oversized *reassembled* messages use 1009.
 - **TLS verification is on by default** and only relaxed by explicit `$sslOptions`.
@@ -371,5 +380,5 @@ Test class names are prefixed `WebsocketClient` because all packages share the `
 - Modifications to `Frame`/`Opcode` — those live in `ez-php/websocket`
 - Auto-reconnect, backoff, or heartbeat scheduling — application-level policy
 - A framework service provider / static façade — this is a standalone client library
-- WebSocket extensions (permessage-deflate) and fragmented *sending*
+- WebSocket extensions other than permessage-deflate, and fragmented *sending*
 - Async/evented multiplexing of many connections

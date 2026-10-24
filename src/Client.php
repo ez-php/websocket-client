@@ -6,7 +6,10 @@ namespace EzPhp\WebsocketClient;
 
 use EzPhp\WebSocket\Frame;
 use EzPhp\WebSocket\HandshakeException;
+use EzPhp\WebSocket\MessageTooBigException;
 use EzPhp\WebSocket\Opcode;
+use EzPhp\WebSocket\PerMessageDeflate;
+use EzPhp\WebSocket\PerMessageDeflateConfig;
 use EzPhp\WebSocket\WebSocketException;
 use InvalidArgumentException;
 
@@ -48,10 +51,13 @@ final class Client
 
     private string $fragmentPayload = '';
 
+    private bool $fragmentCompressed = false;
+
     private function __construct(
         private readonly TransportInterface $transport,
         private readonly FrameEncoder $encoder,
         private readonly ?string $subprotocol,
+        private readonly ?PerMessageDeflate $deflate = null,
     ) {
     }
 
@@ -61,6 +67,7 @@ final class Client
      * @param array<string, string> $headers    Extra request headers (`Authorization`, `Origin`, ...)
      * @param list<string>          $protocols  Requested subprotocols, in preference order
      * @param array<string, mixed>  $sslOptions `ssl` stream-context options for `wss://` (verification is on by default)
+     * @param PerMessageDeflateConfig|null $compression Offer permessage-deflate (RFC 7692); used only if the server accepts
      *
      * @throws InvalidArgumentException on a malformed URL, header or subprotocol
      * @throws ConnectionException      when the connection cannot be opened
@@ -72,10 +79,11 @@ final class Client
         array $protocols = [],
         float $timeout = 5.0,
         array $sslOptions = [],
+        ?PerMessageDeflateConfig $compression = null,
     ): self {
         $parsed = Url::parse($url);
 
-        return self::over(StreamTransport::connect($parsed, $timeout, $sslOptions), $parsed, $headers, $protocols, $timeout);
+        return self::over(StreamTransport::connect($parsed, $timeout, $sslOptions), $parsed, $headers, $protocols, $timeout, $compression);
     }
 
     /**
@@ -95,20 +103,22 @@ final class Client
         array $headers = [],
         array $protocols = [],
         float $timeout = 5.0,
+        ?PerMessageDeflateConfig $compression = null,
     ): self {
         $key = Handshake::generateKey();
 
         try {
-            $transport->write(Handshake::buildRequest($url, $key, $headers, $protocols));
+            $transport->write(Handshake::buildRequest($url, $key, $headers, $protocols, $compression));
             [$head, $leftover] = self::readHead($transport, $timeout);
-            $subprotocol = Handshake::validateResponse($head, $key, $protocols);
+            $subprotocol = Handshake::validateResponse($head, $key, $protocols, $compression !== null);
+            $deflate = $compression === null ? null : Handshake::compression($head, $compression);
         } catch (WebSocketException | InvalidArgumentException $e) {
             $transport->close();
 
             throw $e;
         }
 
-        $client = new self($transport, new FrameEncoder(), $subprotocol);
+        $client = new self($transport, new FrameEncoder(), $subprotocol, $deflate);
         $client->buffer = $leftover;
 
         return $client;
@@ -120,6 +130,14 @@ final class Client
     public function subprotocol(): ?string
     {
         return $this->subprotocol;
+    }
+
+    /**
+     * Whether the server accepted permessage-deflate: messages are then sent and received compressed.
+     */
+    public function isCompressed(): bool
+    {
+        return $this->deflate !== null;
     }
 
     /**
@@ -137,7 +155,7 @@ final class Client
      */
     public function send(string $text): void
     {
-        $this->sendFrame(Opcode::TEXT, $text);
+        $this->sendMessage(Opcode::TEXT, $text);
     }
 
     /**
@@ -147,7 +165,7 @@ final class Client
      */
     public function sendBinary(string $data): void
     {
-        $this->sendFrame(Opcode::BINARY, $data);
+        $this->sendMessage(Opcode::BINARY, $data);
     }
 
     /**
@@ -316,8 +334,14 @@ final class Client
     private function handleFrame(Frame $frame): ?Message
     {
         $opcode = $frame->opcode;
+        $isControl = $opcode === Opcode::PING || $opcode === Opcode::PONG || $opcode === Opcode::CLOSE;
 
-        if ($opcode === Opcode::PING || $opcode === Opcode::PONG || $opcode === Opcode::CLOSE) {
+        // RFC 7692 §6.1: RSV1 marks the first frame of a compressed message, nothing else.
+        if ($frame->rsv1 && ($this->deflate === null || $isControl || $opcode === Opcode::CONTINUATION)) {
+            $this->fail(1002, 'Unexpected RSV1 bit.');
+        }
+
+        if ($isControl) {
             if (!$frame->fin || strlen($frame->payload) > self::MAX_CONTROL_PAYLOAD) {
                 $this->fail(1002, 'Invalid control frame.');
             }
@@ -342,6 +366,7 @@ final class Client
         } else {
             $this->fragmentOpcode = $opcode;
             $this->fragmentPayload = '';
+            $this->fragmentCompressed = $frame->rsv1;
         }
 
         $this->fragmentPayload .= $frame->payload;
@@ -358,6 +383,16 @@ final class Client
         $payload = $this->fragmentPayload;
         $this->fragmentOpcode = null;
         $this->fragmentPayload = '';
+
+        if ($this->fragmentCompressed && $this->deflate !== null) {
+            try {
+                $payload = $this->deflate->decompress($payload, self::MAX_MESSAGE_BYTES);
+            } catch (MessageTooBigException) {
+                $this->fail(1009, 'Message too big.');
+            } catch (WebSocketException) {
+                $this->fail(1007, 'Invalid compressed data.');
+            }
+        }
 
         if ($type === Opcode::TEXT && preg_match('//u', $payload) !== 1) {
             $this->fail(1007, 'Text message is not valid UTF-8.');
@@ -399,6 +434,26 @@ final class Client
         $this->shutdown();
 
         throw new ConnectionException("WebSocket protocol error ({$code}): {$reason}");
+    }
+
+    /**
+     * Send a data message, compressed (RSV1 set) when permessage-deflate was negotiated.
+     *
+     * @throws ConnectionException
+     */
+    private function sendMessage(Opcode $opcode, string $payload): void
+    {
+        if ($this->deflate === null) {
+            $this->sendFrame($opcode, $payload);
+
+            return;
+        }
+
+        if ($this->closed || $this->closeSent) {
+            throw new ConnectionException('The connection is closed.');
+        }
+
+        $this->transport->write($this->encoder->encode($opcode, $this->deflate->compress($payload), rsv1: true));
     }
 
     /**

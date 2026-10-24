@@ -40,6 +40,10 @@ $client->close(1000, 'bye');               // closing handshake, idempotent
 - `wss://` verifies the certificate and host name by default. Override via
   `Client::connect(..., sslOptions: ['cafile' => '/path/ca.pem'])`.
 - Subprotocols: `Client::connect($url, protocols: ['chat'])`, then `$client->subprotocol()`.
+- Compression: `Client::connect($url, compression: new PerMessageDeflateConfig())` offers
+  permessage-deflate (RFC 7692, needs ext-zlib); `$client->isCompressed()` tells whether the server
+  accepted. Messages are then compressed on send and inflated on receive; the 16 MiB message limit
+  applies to the inflated size.
 - The API is blocking and one instance serves one connection.
 
 ---

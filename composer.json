@@ -21,6 +21,9 @@
     "ext-openssl": "*",
     "ez-php/websocket": "^2.6.0"
   },
+  "suggest": {
+    "ext-zlib": "Needed for permessage-deflate compression (PerMessageDeflateConfig)"
+  },
   "require-dev": {
     "ez-php/docker": "^2.6.0",
     "phpunit/phpunit": "^13.0",

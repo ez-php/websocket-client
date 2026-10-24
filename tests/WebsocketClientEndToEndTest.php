@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests;
 
+use EzPhp\WebSocket\PerMessageDeflateConfig;
 use EzPhp\WebsocketClient\Client;
 use EzPhp\WebsocketClient\ConnectionException;
 use RuntimeException;
@@ -37,7 +38,7 @@ final class WebsocketClientEndToEndTest extends TestCase
         self::$port = (int) substr($name, (int) strrpos($name, ':') + 1);
 
         $server = proc_open(
-            [PHP_BINARY, __DIR__ . '/Support/ws-echo-server.php', (string) self::$port],
+            [PHP_BINARY, __DIR__ . '/Support/ws-echo-server.php', (string) self::$port, self::autoloader()],
             [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
             $pipes,
         );
@@ -71,6 +72,14 @@ final class WebsocketClientEndToEndTest extends TestCase
         throw new RuntimeException('The WebSocket server did not accept connections within 5 seconds.');
     }
 
+    /**
+     * The autoloader this test process runs on, handed to the server child process.
+     */
+    private static function autoloader(): string
+    {
+        return dirname((string) (new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 2) . '/autoload.php';
+    }
+
     public static function tearDownAfterClass(): void
     {
         if (is_resource(self::$server)) {
@@ -92,6 +101,24 @@ final class WebsocketClientEndToEndTest extends TestCase
 
         self::assertNotNull($message);
         self::assertSame('echo:hello', $message->payload);
+
+        $client->close();
+    }
+
+    public function test_permessage_deflate_round_trip_with_the_real_server(): void
+    {
+        $client = Client::connect($this->url(), compression: new PerMessageDeflateConfig());
+        $payload = str_repeat('{"type":"next","payload":{"data":{"tick":1}}}', 2000);
+
+        self::assertTrue($client->isCompressed());
+
+        foreach ([$payload, 'short', $payload] as $sent) {
+            $client->send($sent);
+            $message = $client->receive(5.0);
+
+            self::assertNotNull($message);
+            self::assertSame('echo:' . $sent, $message->payload);
+        }
 
         $client->close();
     }

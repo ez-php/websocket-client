@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace EzPhp\WebsocketClient;
 
 use EzPhp\WebSocket\HandshakeException;
+use EzPhp\WebSocket\PerMessageDeflate;
+
+use EzPhp\WebSocket\PerMessageDeflateConfig;
 use InvalidArgumentException;
 
 /**
@@ -43,12 +46,13 @@ final class Handshake
     /**
      * Build the HTTP upgrade request.
      *
-     * @param array<string, string> $headers   Extra request headers (e.g. `Authorization`, `Origin`)
-     * @param list<string>          $protocols Requested subprotocols, in preference order
+     * @param array<string, string>        $headers     Extra request headers (e.g. `Authorization`, `Origin`)
+     * @param list<string>                 $protocols   Requested subprotocols, in preference order
+     * @param PerMessageDeflateConfig|null $compression Offer permessage-deflate (RFC 7692)
      *
      * @throws InvalidArgumentException on a reserved or malformed header, or a malformed subprotocol
      */
-    public static function buildRequest(Url $url, string $key, array $headers = [], array $protocols = []): string
+    public static function buildRequest(Url $url, string $key, array $headers = [], array $protocols = [], ?PerMessageDeflateConfig $compression = null): string
     {
         $lines = [
             "GET {$url->path} HTTP/1.1",
@@ -67,6 +71,10 @@ final class Handshake
             }
 
             $lines[] = 'Sec-WebSocket-Protocol: ' . implode(', ', $protocols);
+        }
+
+        if ($compression !== null) {
+            $lines[] = 'Sec-WebSocket-Extensions: ' . PerMessageDeflate::offer($compression);
         }
 
         foreach ($headers as $name => $value) {
@@ -89,13 +97,15 @@ final class Handshake
     /**
      * Verify the server's response head (status line + headers, without the trailing blank line).
      *
-     * @param list<string> $protocols The subprotocols that were requested
+     * @param list<string> $protocols          The subprotocols that were requested
+     * @param bool         $compressionOffered Whether permessage-deflate was offered; only then may the
+     *                                         response carry `Sec-WebSocket-Extensions` (see compression())
      *
      * @return string|null the subprotocol the server selected, or null when none
      *
      * @throws HandshakeException when the response is not a valid acceptance of `$key`
      */
-    public static function validateResponse(string $head, string $key, array $protocols = []): ?string
+    public static function validateResponse(string $head, string $key, array $protocols = [], bool $compressionOffered = false): ?string
     {
         $lines = explode("\r\n", $head);
         $status = (string) array_shift($lines);
@@ -136,7 +146,7 @@ final class Handshake
             throw new HandshakeException('Handshake response has a missing or invalid Sec-WebSocket-Accept.');
         }
 
-        if (isset($headers['sec-websocket-extensions'])) {
+        if (isset($headers['sec-websocket-extensions']) && !$compressionOffered) {
             throw new HandshakeException('Server negotiated a WebSocket extension that was never requested.');
         }
 
@@ -147,5 +157,27 @@ final class Handshake
         }
 
         return $selected;
+    }
+
+    /**
+     * The permessage-deflate agreement in a validated response head, or null when the
+     * server declined the offer (no `Sec-WebSocket-Extensions` header).
+     *
+     * @throws HandshakeException when the server answered with another extension or invalid parameters
+     */
+    public static function compression(string $head, PerMessageDeflateConfig $config): ?PerMessageDeflate
+    {
+        $value = null;
+
+        foreach (array_slice(explode("\r\n", $head), 1) as $line) {
+            $colon = strpos($line, ':');
+
+            if ($colon !== false && strtolower(trim(substr($line, 0, $colon))) === 'sec-websocket-extensions') {
+                $item = trim(substr($line, $colon + 1));
+                $value = $value === null ? $item : $value . ', ' . $item;
+            }
+        }
+
+        return $value === null ? null : PerMessageDeflate::fromResponse($value, $config);
     }
 }
